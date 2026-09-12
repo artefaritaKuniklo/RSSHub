@@ -3,6 +3,13 @@ import jsBeautify from 'js-beautify';
 const routeTestFailed = 'auto: not ready to review';
 const readyToReview = 'auto: ready to review';
 
+/**
+ * @param {{ github: ReturnType<typeof import('@actions/github').getOctokit>, context: typeof import('@actions/github').context, core: typeof import('@actions/core') }} githubScript
+ * @param {string} baseUrl
+ * @param {string[]} routes
+ * @param {number} number
+ * @returns {Promise<void>}
+ */
 export default async function test({ github, context, core }, baseUrl, routes, number) {
     if (routes[0] === 'NOROUTE') {
         return;
@@ -31,7 +38,9 @@ export default async function test({ github, context, core }, baseUrl, routes, n
             successCount++;
             detail = jsBeautify.html(body.replaceAll(/\s+(\n|$)/g, '\n'), { indent_size: 2 });
         } else {
-            failCount++;
+            if (body && !body.includes('ConfigNotFoundError')) {
+                failCount++;
+            }
             detail = `HTTPError: Response code ${res.status} (${res.statusText})`;
             const errInfoList = body && body.match(/(?<=<p class="message">)(.+?)(?=<\/p>)/gs);
             if (errInfoList) {
@@ -75,29 +84,57 @@ ${detail.slice(0, 65300 - routeFeedback.length)}
 
     if (process.env.PULL_REQUEST) {
         const resultLabel = failCount === links.length || successCount <= failCount ? routeTestFailed : readyToReview;
-        await github.rest.issues
-            .addLabels({
+
+        if (resultLabel === routeTestFailed) {
+            let issue;
+            try {
+                const response = await github.rest.issues.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: number,
+                });
+                issue = response.data;
+            } catch (error) {
+                core.warning(error);
+                throw error;
+            }
+            if (issue.labels.some((l) => l.name === readyToReview)) {
+                try {
+                    await github.rest.issues.removeLabel({
+                        issue_number: number,
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        name: readyToReview,
+                    });
+                } catch (error) {
+                    core.warning(error);
+                }
+            }
+        }
+
+        try {
+            await github.rest.issues.addLabels({
                 issue_number: number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 labels: [resultLabel],
-            })
-            .catch((error) => {
-                core.warning(error);
             });
+        } catch (error) {
+            core.warning(error);
+        }
     }
 
     for await (const comment of commentList) {
         // Intended, one at a time
-        await github.rest.issues
-            .createComment({
+        try {
+            await github.rest.issues.createComment({
                 issue_number: number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 body: comment,
-            })
-            .catch((error) => {
-                core.warning(error);
             });
+        } catch (error) {
+            core.warning(error);
+        }
     }
 }
